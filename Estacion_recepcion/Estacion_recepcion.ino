@@ -31,9 +31,25 @@
 
 #include <esp_now.h>
 #include <WiFi.h>
+#include <WebServer.h>                                // needed to create a simple webserver (make sure tools -> board is set to ESP32, otherwise you will get a "WebServer.h: No such file or directory" error)
+#include <WebSocketsServer_Generic.h>                           // needed for instant communication between client and server through Websockets
+#include <ArduinoJson.h>                              // needed for JSON encapsulation (send multiple variables with one string)
 #include <Arduino_JSON.h>
 
 #define CHANNEL 1
+
+// SSID and password of Wifi connection:
+const char* ssid = "Apnea_device";
+const char* password = "holahola";
+
+// The String below "webpage" contains the complete HTML code that is sent to the client whenever someone connects to the webserver
+String webpage = "<!DOCTYPE html><html><head><title>Page Title</title></head><body style='background-color: #EEEEEE;'><span style='color: #003366;'><h1>Sensors information</h1><p>X: <span id='x_acel'>-</span></p><p>Y: <span id='y_acel'>-</span></p><p>Z: <span id='z_acel'>-</span></p><p><button type='button' id='BTN_SEND_BACK'>Send info to ESP32</button></p></span></body><script> var Socket; document.getElementById('BTN_SEND_BACK').addEventListener('click', button_send_back); function init() { Socket = new WebSocket('ws://' + window.location.hostname + ':81/'); Socket.onmessage = function(event) { processCommand(event); }; } function button_send_back() { var msg = {brand: 'Gibson',type: 'Les Paul Studio',year: 2010,color: 'white'};Socket.send(JSON.stringify(msg)); } function processCommand(event) {var obj = JSON.parse(event.data);document.getElementById('x_acel').innerHTML = obj.x;document.getElementById('y_acel').innerHTML = obj.y;document.getElementById('z_acel').innerHTML = obj.z; console.log(obj.x_acel);console.log(obj.y_acel);console.log(obj.z_acel); } window.onload = function(event) { init(); }</script></html>";
+
+
+// We want to periodically send values to the clients, so we need to define an "interval" and remember the last time we sent data to the client (with "previousMillis")
+int interval = 1000;                                  // send data to the client every 1000ms -> 1s
+unsigned long previousMillis = 0;                     // we use the "millis()" command for time reference and this will output an unsigned long
+
 
 typedef struct struct_message {
     int id;
@@ -48,6 +64,10 @@ typedef struct struct_message {
 struct_message incomingReadings;
 
 JSONVar board;
+
+// Initialization of webserver and websocket
+WebServer server(80);                                 // the server uses port 80 (standard port for websites
+WebSocketsServer webSocket = WebSocketsServer(81);    // the websocket uses port 81 (standard port for websockets
 
 // Init ESP Now with fallback
 void InitESPNow() {
@@ -67,7 +87,7 @@ void InitESPNow() {
 // config AP SSID
 void configDeviceAP() {
   const char *SSID = "Apnea_device";
-  bool result = WiFi.softAP(SSID, "12345678", CHANNEL, 0);
+  bool result = WiFi.softAP(SSID, "holahola", CHANNEL, 0);
   if (!result) {
     Serial.println("AP Config failed.");
   } else {
@@ -90,6 +110,19 @@ void setup() {
   // Once ESPNow is successfully Init, we will register for recv CB to
   // get recv packer info.
   esp_now_register_recv_cb(OnDataRecv);
+
+  //WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  server.on("/", []() {                               // define here wat the webserver needs to do
+    server.send(200, "text/html", webpage);           //    -> it needs to send out the HTML string "webpage" to the client
+  });
+  server.begin();                                     // start server
+  
+  webSocket.begin();                                  // start websocket
+  webSocket.onEvent(webSocketEvent);                  // define a callback function -> what does the ESP32 need to do when an event from the websocket is received? -> run function "webSocketEvent()"
 }
 
 // callback when data is recv from Master
@@ -122,6 +155,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     Serial.printf(" x: %4.2f \n", incomingReadings.x);
     Serial.printf(" y: %4.2f \n", incomingReadings.y);
     Serial.printf(" z: %4.2f \n", incomingReadings.z);
+    axes_data(incomingReadings.x,incomingReadings.y,incomingReadings.z);
   }
   else { Serial.printf(" temp: %4.2f \n", incomingReadings.y);}
   Serial.printf("readingID value: %d \n", incomingReadings.readingId);
@@ -132,5 +166,70 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 }
 
 void loop() {
-  // Chill
+  server.handleClient();                              // Needed for the webserver to handle all clients
+  webSocket.loop();                                   // Update function for the webSockets 
+  
+  unsigned long now = millis();                       // read out the current "time" ("millis()" gives the time in ms since the Arduino started)
+  if ((unsigned long)(now - previousMillis) > interval) { // check if "interval" ms has passed since last time the clients were updated
+   /* 
+    String jsonString = "";                           // create a JSON string for sending data to the client
+    StaticJsonDocument<200> doc;                      // create a JSON container
+    JsonObject object = doc.to<JsonObject>();         // create a JSON Object
+    object["x"] = random(100);                    // write data into the JSON object -> I used "rand1" and "rand2" here, but you can use anything else
+    object["y"] = random(100);
+    object["z"] = random(100);
+    serializeJson(doc, jsonString);                   // convert JSON object to string
+    //Serial.println(jsonString);                       // print JSON string to console for debug purposes (you can comment this out)
+    webSocket.broadcastTXT(jsonString);               // send JSON string to clients
+    
+    previousMillis = now;    */                         // reset previousMillis
+  }
+}
+
+void axes_data (float x_, float y_, float z_){
+      
+    String jsonString = "";                           // create a JSON string for sending data to the client
+    StaticJsonDocument<200> doc;                      // create a JSON container
+    JsonObject object = doc.to<JsonObject>();         // create a JSON Object
+    object["x"] = x_;                    // write data into the JSON object -> I used "rand1" and "rand2" here, but you can use anything else
+    object["y"] = y_;
+    object["z"] = z_;
+    serializeJson(doc, jsonString);                   // convert JSON object to string
+    //Serial.println(jsonString);                       // print JSON string to console for debug purposes (you can comment this out)
+    webSocket.broadcastTXT(jsonString);               // send JSON string to clients
+}
+
+void webSocketEvent(byte num, WStype_t type, uint8_t * payload, size_t length) {      // the parameters of this callback function are always the same -> num: id of the client who send the event, type: type of message, payload: actual data sent and length: length of payload
+  switch (type) {                                     // switch on the type of information sent
+    case WStype_DISCONNECTED:                         // if a client is disconnected, then type == WStype_DISCONNECTED
+      Serial.println("Client " + String(num) + " disconnected");
+      break;
+    case WStype_CONNECTED:                            // if a client is connected, then type == WStype_CONNECTED
+      Serial.println("Client " + String(num) + " connected");
+      // optionally you can add code here what to do when connected
+      break;
+    case WStype_TEXT:                                 // if a client has sent data, then type == WStype_TEXT
+      // try to decipher the JSON string received
+      StaticJsonDocument<200> doc;                    // create a JSON container
+      DeserializationError error = deserializeJson(doc, payload);
+      if (error) {
+        Serial.print(F("deserializeJson() failed: "));
+        Serial.println(error.f_str());
+        return;
+      }
+      else {
+        // JSON string was received correctly, so information can be retrieved:
+        const char* g_brand = doc["brand"];
+        const char* g_type = doc["type"];
+        const int g_year = doc["year"];
+        const char* g_color = doc["color"];
+        Serial.println("Received guitar info from user: " + String(num));
+        Serial.println("Brand: " + String(g_brand));
+        Serial.println("Type: " + String(g_type));
+        Serial.println("Year: " + String(g_year));
+        Serial.println("Color: " + String(g_color));
+      }
+      Serial.println("");
+      break;
+  }
 }
